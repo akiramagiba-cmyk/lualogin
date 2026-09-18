@@ -1,7 +1,7 @@
 // ============================================================
 // RUDO LICENSE SERVER
 // Server + Telegram Bot + Database (all-in-one)
-// v2.0 - All-features-unlocked approach
+// v3.0 - Multi-Device Support
 // ============================================================
 
 const express = require('express');
@@ -15,6 +15,9 @@ const ADMIN_IDS = (process.env.ADMIN_IDS || '')
   .split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
 const PORT = process.env.PORT || 3000;
 
+// Default max devices per key
+const DEFAULT_MAX_DEVICES = 50;
+
 if (!BOT_TOKEN) {
   console.error('BOT_TOKEN not set!');
   process.exit(1);
@@ -27,17 +30,29 @@ db.pragma('journal_mode = WAL');
 db.exec(`
   CREATE TABLE IF NOT EXISTS licenses (
     key TEXT PRIMARY KEY,
-    hwid TEXT,
     expire TEXT NOT NULL,
     active INTEGER DEFAULT 1,
-    login_count INTEGER DEFAULT 0
+    login_count INTEGER DEFAULT 0,
+    max_devices INTEGER DEFAULT 50
   );
+
+  CREATE TABLE IF NOT EXISTS devices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL,
+    hwid TEXT NOT NULL,
+    first_seen INTEGER DEFAULT (strftime('%s','now')),
+    last_seen INTEGER DEFAULT (strftime('%s','now')),
+    UNIQUE(key, hwid)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_devices_key ON devices(key);
 `);
 
 // ================== DB HELPERS ==================
-function createLicense(key, expire) {
+function createLicense(key, expire, maxDevices = DEFAULT_MAX_DEVICES) {
   try {
-    db.prepare('INSERT INTO licenses (key, expire) VALUES (?, ?)').run(key, expire);
+    db.prepare('INSERT INTO licenses (key, expire, max_devices) VALUES (?, ?, ?)')
+      .run(key, expire, maxDevices);
     return true;
   } catch (e) {
     return false;
@@ -46,6 +61,44 @@ function createLicense(key, expire) {
 
 function getLicense(key) {
   return db.prepare('SELECT * FROM licenses WHERE key = ?').get(key) || null;
+}
+
+function getDeviceCount(key) {
+  const row = db.prepare('SELECT COUNT(*) c FROM devices WHERE key = ?').get(key);
+  return row ? row.c : 0;
+}
+
+function registerDevice(key, hwid) {
+  // Check kung existing na yung device
+  const existing = db.prepare('SELECT * FROM devices WHERE key = ? AND hwid = ?').get(key, hwid);
+  
+  if (existing) {
+    // Update last_seen
+    db.prepare('UPDATE devices SET last_seen = strftime("%s","now") WHERE id = ?').run(existing.id);
+    return {ok: true, isNew: false};
+  }
+  
+  // Check kung may slot pa
+  const lic = getLicense(key);
+  const currentCount = getDeviceCount(key);
+  
+  if (currentCount >= lic.max_devices) {
+    return {ok: false, error: 'Device limit reached'};
+  }
+  
+  // Register bagong device
+  db.prepare('INSERT INTO devices (key, hwid) VALUES (?, ?)').run(key, hwid);
+  return {ok: true, isNew: true};
+}
+
+function resetDevices(key) {
+  const r = db.prepare('DELETE FROM devices WHERE key = ?').run(key);
+  return r.changes;
+}
+
+function removeDevice(key, hwid) {
+  const r = db.prepare('DELETE FROM devices WHERE key = ? AND hwid = ?').run(key, hwid);
+  return r.changes > 0;
 }
 
 function validateLogin(key, hwid) {
@@ -57,21 +110,19 @@ function validateLogin(key, hwid) {
   const expire = new Date(lic.expire + 'T23:59:59');
   if (now > expire) return {valid: false, error: 'Key expired'};
 
-  if (!lic.hwid) {
-    db.prepare('UPDATE licenses SET hwid = ? WHERE key = ?').run(hwid, key);
-  } else if (lic.hwid !== hwid) {
-    return {valid: false, error: 'HWID mismatch'};
+  // Register device (multi-device support)
+  const deviceResult = registerDevice(key, hwid);
+  if (!deviceResult.ok) {
+    const count = getDeviceCount(key);
+    return {valid: false, error: `Device limit reached (${count}/${lic.max_devices})`};
   }
 
   db.prepare('UPDATE licenses SET login_count = login_count + 1 WHERE key = ?').run(key);
-  return {valid: true};
-}
-
-function resetHWID(key) {
-  return db.prepare('UPDATE licenses SET hwid = NULL WHERE key = ?').run(key).changes > 0;
+  return {valid: true, deviceCount: getDeviceCount(key), maxDevices: lic.max_devices};
 }
 
 function deleteLicense(key) {
+  db.prepare('DELETE FROM devices WHERE key = ?').run(key);
   return db.prepare('DELETE FROM licenses WHERE key = ?').run(key).changes > 0;
 }
 
@@ -89,6 +140,10 @@ function extendLicense(key, days) {
   return str;
 }
 
+function setMaxDevices(key, count) {
+  return db.prepare('UPDATE licenses SET max_devices = ? WHERE key = ?').run(count, key).changes > 0;
+}
+
 function listLicenses() {
   return db.prepare('SELECT * FROM licenses ORDER BY expire DESC').all();
 }
@@ -96,8 +151,8 @@ function listLicenses() {
 function getStats() {
   const total = db.prepare('SELECT COUNT(*) c FROM licenses').get().c;
   const active = db.prepare('SELECT COUNT(*) c FROM licenses WHERE active = 1').get().c;
-  const bound = db.prepare('SELECT COUNT(*) c FROM licenses WHERE hwid IS NOT NULL').get().c;
-  return {total, active, bound};
+  const devices = db.prepare('SELECT COUNT(*) c FROM devices').get().c;
+  return {total, active, devices};
 }
 
 // ================== KEY GENERATOR ==================
@@ -113,7 +168,7 @@ const app = express();
 app.use(express.json({limit: '10kb'}));
 
 app.get('/', (req, res) => {
-  res.json({name: 'RUDO License Server', status: 'running'});
+  res.json({name: 'RUDO License Server', status: 'running', version: '3.0'});
 });
 
 app.post('/api/login', (req, res) => {
@@ -124,7 +179,12 @@ app.post('/api/login', (req, res) => {
   if (!result.valid) return res.status(200).json({valid: false, error: result.error});
   
   // All features unlocked kapag valid ang login
-  return res.status(200).json({valid: true, premium: true});
+  return res.status(200).json({
+    valid: true,
+    premium: true,
+    deviceCount: result.deviceCount,
+    maxDevices: result.maxDevices
+  });
 });
 
 app.listen(PORT, () => console.log(`[SERVER] Port ${PORT}`));
@@ -155,13 +215,16 @@ bot.onText(/\/help/, (msg) => {
     `User:\n` +
     `/login <key> - Validate key\n\n` +
     `Admin:\n` +
-    `/gen <days> [count] [prefix]\n` +
+    `/gen <days> [count] [prefix] [maxdevices]\n` +
     `/list\n` +
     `/reset <key>\n` +
     `/extend <key> <days>\n` +
     `/disable <key>\n` +
     `/enable <key>\n` +
     `/delete <key>\n` +
+    `/setdevices <key> <count>\n` +
+    `/resetdevices <key>\n` +
+    `/devices <key>\n` +
     `/stats`,
     {parse_mode: 'Markdown'});
 });
@@ -177,18 +240,19 @@ bot.onText(/\/login(?:\s+(.+))?/, (msg, match) => {
   const expire = new Date(lic.expire + 'T23:59:59');
   const daysLeft = Math.ceil((expire - new Date()) / 86400000);
   let status = !lic.active ? 'Disabled' : daysLeft < 0 ? 'Expired' : 'Active';
+  const deviceCount = getDeviceCount(key);
 
   bot.sendMessage(msg.chat.id,
     `License Info\n\n` +
     `Key: \`${lic.key}\`\n` +
     `Status: ${status}\n` +
     `Expires: ${lic.expire} (${daysLeft} days)\n` +
-    `HWID: ${lic.hwid || 'not bound'}\n` +
+    `Devices: ${deviceCount}/${lic.max_devices}\n` +
     `Logins: ${lic.login_count}`,
     {parse_mode: 'Markdown'});
 });
 
-// /gen
+// /gen <days> [count] [prefix] [maxdevices]
 bot.onText(/\/gen(?:\s+(.+))?/, (msg, match) => {
   if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, 'Admin only.');
 
@@ -196,9 +260,15 @@ bot.onText(/\/gen(?:\s+(.+))?/, (msg, match) => {
   const days = parseInt(args[0]);
   const count = Math.min(parseInt(args[1]) || 1, 50);
   const prefix = args[2] || 'RUDO';
+  const maxDevices = parseInt(args[3]) || DEFAULT_MAX_DEVICES;
 
   if (!days || days < 1 || days > 3650) {
-    return bot.sendMessage(msg.chat.id, 'Usage: `/gen <days> [count] [prefix]`', {parse_mode: 'Markdown'});
+    return bot.sendMessage(msg.chat.id,
+      `Usage: \`/gen <days> [count] [prefix] [maxdevices]\`\n\n` +
+      `Examples:\n` +
+      `\`/gen 3 1 RUDO 50\` - 1 key, 3 days, 50 devices\n` +
+      `\`/gen 7 5 FREE 10\` - 5 keys, 7 days, 10 devices each`,
+      {parse_mode: 'Markdown'});
   }
 
   const d = new Date();
@@ -209,12 +279,14 @@ bot.onText(/\/gen(?:\s+(.+))?/, (msg, match) => {
   for (let i = 0; i < count; i++) {
     let key;
     do { key = generateKey(prefix); } while (getLicense(key));
-    if (createLicense(key, expire)) keys.push(key);
+    if (createLicense(key, expire, maxDevices)) keys.push(key);
   }
 
   bot.sendMessage(msg.chat.id,
     `Generated ${keys.length} key(s)\n` +
-    `Expires: ${expire}\n\n` +
+    `Duration: ${days} days\n` +
+    `Expires: ${expire}\n` +
+    `Max devices per key: ${maxDevices}\n\n` +
     keys.map(k => `\`${k}\``).join('\n'),
     {parse_mode: 'Markdown'});
 });
@@ -225,21 +297,71 @@ bot.onText(/\/list/, (msg) => {
   const list = listLicenses();
   if (!list.length) return bot.sendMessage(msg.chat.id, 'No licenses yet.');
 
-  const text = list.slice(0, 30).map(l => {
+  const text = list.slice(0, 20).map(l => {
     const days = Math.ceil((new Date(l.expire + 'T23:59:59') - new Date()) / 86400000);
     const status = !l.active ? 'X' : days < 0 ? 'E' : 'O';
-    return `[${status}] \`${l.key}\` (${days}d)`;
+    const devices = getDeviceCount(l.key);
+    return `[${status}] \`${l.key}\` (${days}d, ${devices}/${l.max_devices} dev)`;
   }).join('\n');
 
   bot.sendMessage(msg.chat.id, `Licenses (${list.length}):\n\n${text}`, {parse_mode: 'Markdown'});
 });
 
-// /reset
+// /reset <key> - Resets ALL devices
 bot.onText(/\/reset(?:\s+(.+))?/, (msg, match) => {
   if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, 'Admin only.');
   const key = (match[1] || '').trim();
   if (!key) return bot.sendMessage(msg.chat.id, 'Usage: `/reset <key>`', {parse_mode: 'Markdown'});
-  bot.sendMessage(msg.chat.id, resetHWID(key) ? `HWID reset: \`${key}\`` : 'Key not found.', {parse_mode: 'Markdown'});
+  
+  const count = resetDevices(key);
+  bot.sendMessage(msg.chat.id, count > 0 
+    ? `Reset ${count} device(s) for \`${key}\`` 
+    : `No devices found for \`${key}\``, 
+    {parse_mode: 'Markdown'});
+});
+
+// /resetdevices <key> - Same as /reset
+bot.onText(/\/resetdevices(?:\s+(.+))?/, (msg, match) => {
+  if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, 'Admin only.');
+  const key = (match[1] || '').trim();
+  if (!key) return bot.sendMessage(msg.chat.id, 'Usage: `/resetdevices <key>`', {parse_mode: 'Markdown'});
+  
+  const count = resetDevices(key);
+  bot.sendMessage(msg.chat.id, count > 0 
+    ? `Reset ${count} device(s) for \`${key}\`` 
+    : `No devices found for \`${key}\``, 
+    {parse_mode: 'Markdown'});
+});
+
+// /devices <key> - List devices
+bot.onText(/\/devices(?:\s+(.+))?/, (msg, match) => {
+  if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, 'Admin only.');
+  const key = (match[1] || '').trim();
+  if (!key) return bot.sendMessage(msg.chat.id, 'Usage: `/devices <key>`', {parse_mode: 'Markdown'});
+  
+  const devices = db.prepare('SELECT * FROM devices WHERE key = ? ORDER BY last_seen DESC').all(key);
+  if (!devices.length) return bot.sendMessage(msg.chat.id, 'No devices registered.');
+  
+  const text = devices.map((d, i) => {
+    const lastSeen = new Date(d.last_seen * 1000).toISOString().split('T')[0];
+    return `${i+1}. \`${d.hwid.substring(0, 20)}...\` (${lastSeen})`;
+  }).join('\n');
+  
+  bot.sendMessage(msg.chat.id, `Devices for \`${key}\` (${devices.length}):\n\n${text}`, {parse_mode: 'Markdown'});
+});
+
+// /setdevices <key> <count>
+bot.onText(/\/setdevices(?:\s+(.+))?/, (msg, match) => {
+  if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, 'Admin only.');
+  const args = (match[1] || '').split(/\s+/);
+  const key = args[0], count = parseInt(args[1]);
+  if (!key || !count) return bot.sendMessage(msg.chat.id, 'Usage: `/setdevices <key> <count>`', {parse_mode: 'Markdown'});
+  
+  if (setMaxDevices(key, count)) {
+    bot.sendMessage(msg.chat.id, `Max devices for \`${key}\` set to ${count}`, {parse_mode: 'Markdown'});
+  } else {
+    bot.sendMessage(msg.chat.id, 'Key not found.');
+  }
 });
 
 // /extend
@@ -281,7 +403,7 @@ bot.onText(/\/stats/, (msg) => {
   if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, 'Admin only.');
   const s = getStats();
   bot.sendMessage(msg.chat.id,
-    `Stats\n\nTotal: ${s.total}\nActive: ${s.active}\nBound: ${s.bound}`,
+    `Stats\n\nTotal licenses: ${s.total}\nActive: ${s.active}\nTotal devices: ${s.devices}`,
     {parse_mode: 'Markdown'});
 });
 
