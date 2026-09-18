@@ -1,6 +1,7 @@
 // ============================================================
 // RUDO LICENSE SERVER
 // Server + Telegram Bot + Database (all-in-one)
+// v2.0 - All-features-unlocked approach
 // ============================================================
 
 const express = require('express');
@@ -15,7 +16,7 @@ const ADMIN_IDS = (process.env.ADMIN_IDS || '')
 const PORT = process.env.PORT || 3000;
 
 if (!BOT_TOKEN) {
-  console.error('❌ BOT_TOKEN not set!');
+  console.error('BOT_TOKEN not set!');
   process.exit(1);
 }
 
@@ -29,25 +30,14 @@ db.exec(`
     hwid TEXT,
     expire TEXT NOT NULL,
     active INTEGER DEFAULT 1,
-    login_count INTEGER DEFAULT 0,
-    features TEXT NOT NULL
+    login_count INTEGER DEFAULT 0
   );
 `);
 
-const DEFAULT_FEATURES = {
-  nograss: true,
-  drone: true,
-  maphack: true,
-  damage: true,
-  skin: true,
-  skiptime: true
-};
-
 // ================== DB HELPERS ==================
-function createLicense(key, expire, features = DEFAULT_FEATURES) {
+function createLicense(key, expire) {
   try {
-    db.prepare('INSERT INTO licenses (key, expire, features) VALUES (?, ?, ?)')
-      .run(key, expire, JSON.stringify(features));
+    db.prepare('INSERT INTO licenses (key, expire) VALUES (?, ?)').run(key, expire);
     return true;
   } catch (e) {
     return false;
@@ -55,9 +45,7 @@ function createLicense(key, expire, features = DEFAULT_FEATURES) {
 }
 
 function getLicense(key) {
-  const row = db.prepare('SELECT * FROM licenses WHERE key = ?').get(key);
-  if (!row) return null;
-  return {...row, features: JSON.parse(row.features)};
+  return db.prepare('SELECT * FROM licenses WHERE key = ?').get(key) || null;
 }
 
 function validateLogin(key, hwid) {
@@ -76,7 +64,7 @@ function validateLogin(key, hwid) {
   }
 
   db.prepare('UPDATE licenses SET login_count = login_count + 1 WHERE key = ?').run(key);
-  return {valid: true, features: lic.features};
+  return {valid: true};
 }
 
 function resetHWID(key) {
@@ -134,7 +122,9 @@ app.post('/api/login', (req, res) => {
 
   const result = validateLogin(key, hwid);
   if (!result.valid) return res.status(200).json({valid: false, error: result.error});
-  return res.status(200).json({valid: true, ...result.features});
+  
+  // All features unlocked kapag valid ang login
+  return res.status(200).json({valid: true, premium: true});
 });
 
 app.listen(PORT, () => console.log(`[SERVER] Port ${PORT}`));
@@ -149,22 +139,22 @@ function isAdmin(msg) {
 // /start
 bot.onText(/\/start/, (msg) => {
   bot.sendMessage(msg.chat.id,
-    `👋 *RUDO License Bot*\n\n` +
+    `RUDO License Bot\n\n` +
     `Commands:\n` +
     `/login <key> - Check your license\n` +
     `/help - Show all commands\n\n` +
-    `📢 Channel: https://t.me/arcane_rudo\n` +
-    `👤 Owner: @Arcane_028`,
+    `Channel: https://t.me/arcane_rudo\n` +
+    `Owner: @Arcane_028`,
     {parse_mode: 'Markdown'});
 });
 
 // /help
 bot.onText(/\/help/, (msg) => {
   bot.sendMessage(msg.chat.id,
-    `📖 *Commands*\n\n` +
-    `*User:*\n` +
+    `Commands\n\n` +
+    `User:\n` +
     `/login <key> - Validate key\n\n` +
-    `*Admin:*\n` +
+    `Admin:\n` +
     `/gen <days> [count] [prefix]\n` +
     `/list\n` +
     `/reset <key>\n` +
@@ -179,17 +169,17 @@ bot.onText(/\/help/, (msg) => {
 // /login
 bot.onText(/\/login(?:\s+(.+))?/, (msg, match) => {
   const key = match[1] ? match[1].trim() : null;
-  if (!key) return bot.sendMessage(msg.chat.id, '❌ Usage: `/login RUDO-XXXXXXXX`', {parse_mode: 'Markdown'});
+  if (!key) return bot.sendMessage(msg.chat.id, 'Usage: `/login RUDO-XXXXXXXX`', {parse_mode: 'Markdown'});
 
   const lic = getLicense(key);
-  if (!lic) return bot.sendMessage(msg.chat.id, '❌ Invalid key.');
+  if (!lic) return bot.sendMessage(msg.chat.id, 'Invalid key.');
 
   const expire = new Date(lic.expire + 'T23:59:59');
   const daysLeft = Math.ceil((expire - new Date()) / 86400000);
-  let status = !lic.active ? '🚫 Disabled' : daysLeft < 0 ? '⏰ Expired' : '✅ Active';
+  let status = !lic.active ? 'Disabled' : daysLeft < 0 ? 'Expired' : 'Active';
 
   bot.sendMessage(msg.chat.id,
-    `🔑 *License Info*\n\n` +
+    `License Info\n\n` +
     `Key: \`${lic.key}\`\n` +
     `Status: ${status}\n` +
     `Expires: ${lic.expire} (${daysLeft} days)\n` +
@@ -200,7 +190,7 @@ bot.onText(/\/login(?:\s+(.+))?/, (msg, match) => {
 
 // /gen
 bot.onText(/\/gen(?:\s+(.+))?/, (msg, match) => {
-  if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, '🚫 Admin only.');
+  if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, 'Admin only.');
 
   const args = (match[1] || '').split(/\s+/);
   const days = parseInt(args[0]);
@@ -208,7 +198,7 @@ bot.onText(/\/gen(?:\s+(.+))?/, (msg, match) => {
   const prefix = args[2] || 'RUDO';
 
   if (!days || days < 1 || days > 3650) {
-    return bot.sendMessage(msg.chat.id, '❌ Usage: `/gen <days> [count] [prefix]`', {parse_mode: 'Markdown'});
+    return bot.sendMessage(msg.chat.id, 'Usage: `/gen <days> [count] [prefix]`', {parse_mode: 'Markdown'});
   }
 
   const d = new Date();
@@ -223,7 +213,7 @@ bot.onText(/\/gen(?:\s+(.+))?/, (msg, match) => {
   }
 
   bot.sendMessage(msg.chat.id,
-    `✅ *Generated ${keys.length} key(s)*\n` +
+    `Generated ${keys.length} key(s)\n` +
     `Expires: ${expire}\n\n` +
     keys.map(k => `\`${k}\``).join('\n'),
     {parse_mode: 'Markdown'});
@@ -231,67 +221,67 @@ bot.onText(/\/gen(?:\s+(.+))?/, (msg, match) => {
 
 // /list
 bot.onText(/\/list/, (msg) => {
-  if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, '🚫 Admin only.');
+  if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, 'Admin only.');
   const list = listLicenses();
-  if (!list.length) return bot.sendMessage(msg.chat.id, '📭 No licenses yet.');
+  if (!list.length) return bot.sendMessage(msg.chat.id, 'No licenses yet.');
 
   const text = list.slice(0, 30).map(l => {
     const days = Math.ceil((new Date(l.expire + 'T23:59:59') - new Date()) / 86400000);
-    const status = !l.active ? '🚫' : days < 0 ? '⏰' : '✅';
-    return `${status} \`${l.key}\` (${days}d)`;
+    const status = !l.active ? 'X' : days < 0 ? 'E' : 'O';
+    return `[${status}] \`${l.key}\` (${days}d)`;
   }).join('\n');
 
-  bot.sendMessage(msg.chat.id, `📋 *Licenses (${list.length}):*\n\n${text}`, {parse_mode: 'Markdown'});
+  bot.sendMessage(msg.chat.id, `Licenses (${list.length}):\n\n${text}`, {parse_mode: 'Markdown'});
 });
 
 // /reset
 bot.onText(/\/reset(?:\s+(.+))?/, (msg, match) => {
-  if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, '🚫 Admin only.');
+  if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, 'Admin only.');
   const key = (match[1] || '').trim();
-  if (!key) return bot.sendMessage(msg.chat.id, '❌ Usage: `/reset <key>`', {parse_mode: 'Markdown'});
-  bot.sendMessage(msg.chat.id, resetHWID(key) ? `✅ HWID reset: \`${key}\`` : '❌ Key not found.', {parse_mode: 'Markdown'});
+  if (!key) return bot.sendMessage(msg.chat.id, 'Usage: `/reset <key>`', {parse_mode: 'Markdown'});
+  bot.sendMessage(msg.chat.id, resetHWID(key) ? `HWID reset: \`${key}\`` : 'Key not found.', {parse_mode: 'Markdown'});
 });
 
 // /extend
 bot.onText(/\/extend(?:\s+(.+))?/, (msg, match) => {
-  if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, '🚫 Admin only.');
+  if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, 'Admin only.');
   const args = (match[1] || '').split(/\s+/);
   const key = args[0], days = parseInt(args[1]);
-  if (!key || !days) return bot.sendMessage(msg.chat.id, '❌ Usage: `/extend <key> <days>`', {parse_mode: 'Markdown'});
+  if (!key || !days) return bot.sendMessage(msg.chat.id, 'Usage: `/extend <key> <days>`', {parse_mode: 'Markdown'});
   const newDate = extendLicense(key, days);
-  bot.sendMessage(msg.chat.id, newDate ? `✅ Extended to ${newDate}` : '❌ Key not found.');
+  bot.sendMessage(msg.chat.id, newDate ? `Extended to ${newDate}` : 'Key not found.');
 });
 
 // /disable
 bot.onText(/\/disable(?:\s+(.+))?/, (msg, match) => {
-  if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, '🚫 Admin only.');
+  if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, 'Admin only.');
   const key = (match[1] || '').trim();
-  if (!key) return bot.sendMessage(msg.chat.id, '❌ Usage: `/disable <key>`', {parse_mode: 'Markdown'});
-  bot.sendMessage(msg.chat.id, setActive(key, false) ? `🚫 Disabled: \`${key}\`` : '❌ Not found.', {parse_mode: 'Markdown'});
+  if (!key) return bot.sendMessage(msg.chat.id, 'Usage: `/disable <key>`', {parse_mode: 'Markdown'});
+  bot.sendMessage(msg.chat.id, setActive(key, false) ? `Disabled: \`${key}\`` : 'Not found.', {parse_mode: 'Markdown'});
 });
 
 // /enable
 bot.onText(/\/enable(?:\s+(.+))?/, (msg, match) => {
-  if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, '🚫 Admin only.');
+  if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, 'Admin only.');
   const key = (match[1] || '').trim();
-  if (!key) return bot.sendMessage(msg.chat.id, '❌ Usage: `/enable <key>`', {parse_mode: 'Markdown'});
-  bot.sendMessage(msg.chat.id, setActive(key, true) ? `✅ Enabled: \`${key}\`` : '❌ Not found.', {parse_mode: 'Markdown'});
+  if (!key) return bot.sendMessage(msg.chat.id, 'Usage: `/enable <key>`', {parse_mode: 'Markdown'});
+  bot.sendMessage(msg.chat.id, setActive(key, true) ? `Enabled: \`${key}\`` : 'Not found.', {parse_mode: 'Markdown'});
 });
 
 // /delete
 bot.onText(/\/delete(?:\s+(.+))?/, (msg, match) => {
-  if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, '🚫 Admin only.');
+  if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, 'Admin only.');
   const key = (match[1] || '').trim();
-  if (!key) return bot.sendMessage(msg.chat.id, '❌ Usage: `/delete <key>`', {parse_mode: 'Markdown'});
-  bot.sendMessage(msg.chat.id, deleteLicense(key) ? `🗑️ Deleted: \`${key}\`` : '❌ Not found.', {parse_mode: 'Markdown'});
+  if (!key) return bot.sendMessage(msg.chat.id, 'Usage: `/delete <key>`', {parse_mode: 'Markdown'});
+  bot.sendMessage(msg.chat.id, deleteLicense(key) ? `Deleted: \`${key}\`` : 'Not found.', {parse_mode: 'Markdown'});
 });
 
 // /stats
 bot.onText(/\/stats/, (msg) => {
-  if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, '🚫 Admin only.');
+  if (!isAdmin(msg)) return bot.sendMessage(msg.chat.id, 'Admin only.');
   const s = getStats();
   bot.sendMessage(msg.chat.id,
-    `📊 *Stats*\n\nTotal: ${s.total}\nActive: ${s.active}\nBound: ${s.bound}`,
+    `Stats\n\nTotal: ${s.total}\nActive: ${s.active}\nBound: ${s.bound}`,
     {parse_mode: 'Markdown'});
 });
 
